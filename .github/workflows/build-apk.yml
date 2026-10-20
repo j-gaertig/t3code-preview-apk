@@ -220,12 +220,12 @@ jobs:
 
       - name: Wire release signing key into Gradle
         run: |
-          python3 -c "
+          python3 - <<'PY'
           import re
           p = 'apps/mobile/android/app/build.gradle'
           s = open(p).read()
           sc = s.index('signingConfigs')
-          m = re.search(\"keyPassword 'android'\n *}\", s[sc:])
+          m = re.search("keyPassword 'android'\n *}", s[sc:])
           assert m, 'debug signing block close not found'
           e = sc + m.end()
           ins = '''
@@ -236,6 +236,21 @@ jobs:
                       keyPassword System.getenv('ANDROID_KEY_PASSWORD')
                   }'''
           s = s[:e] + ins + s[e:]
+          # ABI splits: one slim arm64-v8a APK plus a universal APK with all ABIs.
+          # Compiled native code is identical to before; only packaging changes.
+          line_start = s.rfind('\n', 0, sc) + 1
+          indent = s[line_start:sc]
+          splits = (
+              indent + 'splits {\n'
+              + indent + '    abi {\n'
+              + indent + '        reset()\n'
+              + indent + '        enable true\n'
+              + indent + "        include 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'\n"
+              + indent + '        universalApk true\n'
+              + indent + '    }\n'
+              + indent + '}\n\n'
+          )
+          s = s[:line_start] + splits + s[line_start:]
           bt = s.index('buildTypes {')
           rel = s.index('release {', bt)
           old = 'signingConfig signingConfigs.debug'
@@ -243,8 +258,10 @@ jobs:
           s = s[:k] + 'signingConfig signingConfigs.forkRelease' + s[k+len(old):]
           open(p, 'w').write(s)
           print('release signing wired to ANDROID_KEYSTORE_* env')
-          "
+          print('abi splits enabled: per-ABI APKs plus universal')
+          PY
           grep -n -A8 'forkRelease' apps/mobile/android/app/build.gradle | head -14
+          grep -n -A7 'splits {' apps/mobile/android/app/build.gradle | head -9
 
       - name: Build release APK (incremental, cached)
         working-directory: apps/mobile/android
@@ -252,96 +269,137 @@ jobs:
           GRADLE_OPTS: -Dorg.gradle.caching=true -Dorg.gradle.parallel=true
         run: ./gradlew assembleRelease --parallel -x lint -x test
 
-      - name: Verify package, signing key, and universal APK
+      - name: Verify packages, signing key, and APK variants
         id: verify
         run: |
-          apk="apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
+          set -euo pipefail
+          apk_dir="apps/mobile/android/app/build/outputs/apk/release"
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
           aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1)"
-          test -f "$apk" && test -x "$apksigner" && test -x "$aapt"
-
-          package="$("$aapt" dump badging "$apk" | awk -F "'" '/^package: name=/ { print $2; exit }')"
-          if [ "$package" != "com.t3tools.t3code" ]; then
-            echo "::error::Unexpected Android package ID: $package"
-            exit 1
-          fi
-
-          version_name="$("$aapt" dump badging "$apk" | sed -nE "s/.*versionName='([^']+)'.*/\1/p" | head -n 1)"
-          version_code="$("$aapt" dump badging "$apk" | sed -nE "s/.*versionCode='([^']+)'.*/\1/p" | head -n 1)"
+          test -x "$apksigner" && test -x "$aapt"
 
           expected_cert="$(keytool -exportcert -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" | sha256sum | cut -d' ' -f1)"
-          actual_cert="$("$apksigner" verify --print-certs "$apk" | sed -nE 's/.*SHA-256 digest:[[:space:]]*//p' | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
-          if [ -z "$actual_cert" ] || [ "$actual_cert" != "$expected_cert" ]; then
-            echo "::error::APK signature does not match the configured Android keystore (expected certificate SHA-256: $expected_cert; APK certificate SHA-256: ${actual_cert:-missing})."
-            echo "--- apksigner output ---"
-            "$apksigner" verify --print-certs "$apk" || true
-            echo "--- keystore aliases ---"
-            keytool -list -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" || true
-            exit 1
-          fi
 
-          abis="$(unzip -Z1 "$apk" | awk -F/ '$1 == "lib" && NF > 2 { print $2 }' | sort -u | paste -sd, -)"
-          abi_count="$(printf '%s' "$abis" | awk -F, '{ print NF }')"
-          if [ "$abi_count" -lt 2 ]; then
-            echo "::error::Expected a universal APK with multiple native ABIs; found: $abis"
-            exit 1
-          fi
+          for entry in "universal app-universal-release.apk" "arm64v8a app-arm64-v8a-release.apk"; do
+            name="${entry%% *}"; file="${entry#* }"
+            apk="$apk_dir/$file"
+            if ! test -f "$apk"; then
+              echo "::error::Expected APK not found: $apk; available outputs: $(ls -1 "$apk_dir" 2>/dev/null | tr '\n' ' ')"
+              exit 1
+            fi
 
-          sha256="$(sha256sum "$apk" | cut -d' ' -f1)"
-          size_bytes="$(stat -c%s "$apk")"
-          size_human="$(du -h "$apk" | cut -f1)"
+            package="$("$aapt" dump badging "$apk" | awk -F "'" '/^package: name=/ { print $2; exit }')"
+            if [ "$package" != "com.t3tools.t3code" ]; then
+              echo "::error::Unexpected Android package ID in $file: $package"
+              exit 1
+            fi
 
-          echo "Verified package=$package versionName=$version_name versionCode=$version_code ABIs=$abis signingCertificateSHA256=$actual_cert"
-          {
-            echo "apk_package=$package"
-            echo "apk_version_name=$version_name"
-            echo "apk_version_code=$version_code"
-            echo "apk_abis=$abis"
-            echo "apk_cert_sha256=$actual_cert"
-            echo "apk_sha256=$sha256"
-            echo "apk_size_bytes=$size_bytes"
-            echo "apk_size_human=$size_human"
-          } >> "$GITHUB_OUTPUT"
+            version_name="$("$aapt" dump badging "$apk" | sed -nE "s/.*versionName='([^']+)'.*/\1/p" | head -n 1)"
+            version_code="$("$aapt" dump badging "$apk" | sed -nE "s/.*versionCode='([^']+)'.*/\1/p" | head -n 1)"
 
-      - name: Name release asset
-        run: cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk t3code-universal.apk
+            actual_cert="$("$apksigner" verify --print-certs "$apk" | sed -nE 's/.*SHA-256 digest:[[:space:]]*//p' | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+            if [ -z "$actual_cert" ] || [ "$actual_cert" != "$expected_cert" ]; then
+              echo "::error::APK signature of $file does not match the configured Android keystore (expected certificate SHA-256: $expected_cert; APK certificate SHA-256: ${actual_cert:-missing})."
+              echo "--- apksigner output ---"
+              "$apksigner" verify --print-certs "$apk" || true
+              echo "--- keystore aliases ---"
+              keytool -list -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" || true
+              exit 1
+            fi
+
+            abis="$(unzip -Z1 "$apk" | awk -F/ '$1 == "lib" && NF > 2 { print $2 }' | sort -u | paste -sd, -)"
+            abi_count="$(printf '%s' "$abis" | awk -F, '{ print NF }')"
+            if [ "$name" = "universal" ]; then
+              if [ "$abi_count" -lt 2 ]; then
+                echo "::error::Expected the universal APK to bundle multiple native ABIs; found: $abis"
+                exit 1
+              fi
+            elif [ "$abis" != "arm64-v8a" ]; then
+              echo "::error::Expected the arm64 split APK to contain exactly arm64-v8a; found: $abis"
+              exit 1
+            fi
+
+            sha256="$(sha256sum "$apk" | cut -d' ' -f1)"
+            size_bytes="$(stat -c%s "$apk")"
+            size_human="$(du -h "$apk" | cut -f1)"
+            size_mb="$(awk -v b="$size_bytes" 'BEGIN { printf "%.1f", b / 1048576 }')"
+
+            echo "Verified $file: package=$package versionName=$version_name versionCode=$version_code ABIs=$abis signingCertificateSHA256=$actual_cert"
+            {
+              echo "apk_${name}_sha256=$sha256"
+              echo "apk_${name}_size_bytes=$size_bytes"
+              echo "apk_${name}_size_human=$size_human"
+              echo "apk_${name}_size_mb=$size_mb"
+              echo "apk_${name}_abis=$abis"
+            } >> "$GITHUB_OUTPUT"
+            if [ "$name" = "universal" ]; then
+              {
+                echo "apk_package=$package"
+                echo "apk_version_name=$version_name"
+                echo "apk_version_code=$version_code"
+                echo "apk_cert_sha256=$actual_cert"
+              } >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - name: Name release assets
+        run: |
+          cp apps/mobile/android/app/build/outputs/apk/release/app-universal-release.apk t3code-universal.apk
+          cp apps/mobile/android/app/build/outputs/apk/release/app-arm64-v8a-release.apk t3code-arm64-v8a.apk
 
       - name: Compose release body
         env:
           UPSTREAM_OLD: ${{ needs.sync.outputs.upstream_old }}
           UPSTREAM_NEW: ${{ needs.sync.outputs.upstream_new }}
+          TAG_NAME: android-${{ github.run_number }}-${{ needs.sync.outputs.upstream_new }}
           APK_PACKAGE: ${{ steps.verify.outputs.apk_package }}
           APK_VERSION_NAME: ${{ steps.verify.outputs.apk_version_name }}
           APK_VERSION_CODE: ${{ steps.verify.outputs.apk_version_code }}
-          APK_ABIS: ${{ steps.verify.outputs.apk_abis }}
           APK_CERT_SHA256: ${{ steps.verify.outputs.apk_cert_sha256 }}
-          APK_SHA256: ${{ steps.verify.outputs.apk_sha256 }}
-          APK_SIZE_HUMAN: ${{ steps.verify.outputs.apk_size_human }}
-          APK_SIZE_BYTES: ${{ steps.verify.outputs.apk_size_bytes }}
+          ARM64_ABIS: ${{ steps.verify.outputs.apk_arm64v8a_abis }}
+          ARM64_SIZE_HUMAN: ${{ steps.verify.outputs.apk_arm64v8a_size_human }}
+          ARM64_SIZE_BYTES: ${{ steps.verify.outputs.apk_arm64v8a_size_bytes }}
+          ARM64_SHA256: ${{ steps.verify.outputs.apk_arm64v8a_sha256 }}
+          UNIVERSAL_ABIS: ${{ steps.verify.outputs.apk_universal_abis }}
+          UNIVERSAL_SIZE_HUMAN: ${{ steps.verify.outputs.apk_universal_size_human }}
+          UNIVERSAL_SIZE_BYTES: ${{ steps.verify.outputs.apk_universal_size_bytes }}
+          UNIVERSAL_SHA256: ${{ steps.verify.outputs.apk_universal_sha256 }}
         run: |
+          arm64_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/t3code-arm64-v8a.apk"
+          universal_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/t3code-universal.apk"
+          arm64_badge="https://forthebadge.com/api/badges/generate?panels=2&primaryLabel=Download+APK&secondaryLabel=arm64%2Bv8a&primaryBGColor=%2331C4F3&primaryTextColor=%23FFFFFF&secondaryBGColor=%23389AD5&secondaryTextColor=%23FFFFFF&primaryFontSize=12&primaryFontWeight=600&primaryLetterSpacing=2&primaryFontFamily=Roboto&primaryTextTransform=uppercase&secondaryFontSize=12&secondaryFontWeight=900&secondaryLetterSpacing=0&secondaryFontFamily=Verdana&secondaryTextTransform=lowercase&borderRadius=5"
+          universal_badge="https://forthebadge.com/api/badges/generate?panels=2&primaryLabel=Download+APK&secondaryLabel=universal&primaryBGColor=%2331C4F3&primaryTextColor=%23FFFFFF&secondaryBGColor=%23389AD5&secondaryTextColor=%23FFFFFF&primaryFontSize=12&primaryFontWeight=600&primaryLetterSpacing=2&primaryFontFamily=Roboto&primaryTextTransform=uppercase&secondaryFontSize=12&secondaryFontWeight=900&secondaryLetterSpacing=0&secondaryFontFamily=Verdana&secondaryTextTransform=lowercase&borderRadius=5"
           {
             echo "Built from \`upstream\` branch at \`$UPSTREAM_NEW\` (official range \`${UPSTREAM_OLD:0:7}\`...\`${UPSTREAM_NEW:0:7}\`)."
             echo
-            echo "Universal Android release APK, signed with this fork's private key (not the Play Store key). Uninstall the Play Store app before installing."
+            echo "Both APKs come from the same build and are signed with this fork's private key (not the Play Store key). Uninstall the Play Store app before installing."
+            echo
+            echo "### Downloads"
+            echo
+            echo "[![Download arm64-v8a APK]($arm64_badge)]($arm64_url)"
+            echo
+            echo "[![Download universal APK]($universal_badge)]($universal_url)"
+            echo
+            echo "- \`t3code-arm64-v8a.apk\` — slim download for arm64-v8a devices, i.e. essentially all modern phones."
+            echo "- \`t3code-universal.apk\` — also bundles \`armeabi-v7a\`, \`x86\` and \`x86_64\` libraries for emulators, Chromebooks and older devices."
             echo
             echo "### APK metadata"
             echo
-            echo "| Field | Value |"
-            echo "| --- | --- |"
-            echo "| package | \`$APK_PACKAGE\` |"
-            echo "| versionName | \`$APK_VERSION_NAME\` |"
-            echo "| versionCode | \`$APK_VERSION_CODE\` |"
-            echo "| size | $APK_SIZE_HUMAN (\`$APK_SIZE_BYTES\` bytes) |"
-            echo "| SHA-256 | \`$APK_SHA256\` |"
-            echo "| ABIs | \`$APK_ABIS\` |"
-            echo "| signing cert SHA-256 | \`$APK_CERT_SHA256\` |"
-            echo "| upstream | [\`${UPSTREAM_OLD:0:7}...${UPSTREAM_NEW:0:7}\`](https://github.com/pingdotgg/t3code/compare/${UPSTREAM_OLD}...${UPSTREAM_NEW}) |"
+            echo "| Field | arm64-v8a (\`t3code-arm64-v8a.apk\`) | universal (\`t3code-universal.apk\`) |"
+            echo "| --- | --- | --- |"
+            echo "| size | $ARM64_SIZE_HUMAN (\`$ARM64_SIZE_BYTES\` bytes) | $UNIVERSAL_SIZE_HUMAN (\`$UNIVERSAL_SIZE_BYTES\` bytes) |"
+            echo "| SHA-256 | \`$ARM64_SHA256\` | \`$UNIVERSAL_SHA256\` |"
+            echo "| ABIs | \`$ARM64_ABIS\` | \`$UNIVERSAL_ABIS\` |"
+            echo "| package | \`$APK_PACKAGE\` | \`$APK_PACKAGE\` |"
+            echo "| versionName / versionCode | \`$APK_VERSION_NAME\` / \`$APK_VERSION_CODE\` | \`$APK_VERSION_NAME\` / \`$APK_VERSION_CODE\` |"
+            echo "| signing cert SHA-256 | \`$APK_CERT_SHA256\` | \`$APK_CERT_SHA256\` |"
+            echo "| upstream | [\`${UPSTREAM_OLD:0:7}...${UPSTREAM_NEW:0:7}\`](https://github.com/pingdotgg/t3code/compare/${UPSTREAM_OLD}...${UPSTREAM_NEW}) | [\`${UPSTREAM_OLD:0:7}...${UPSTREAM_NEW:0:7}\`](https://github.com/pingdotgg/t3code/compare/${UPSTREAM_OLD}...${UPSTREAM_NEW}) |"
             if [ -f .release/mobile-release-notes.md ]; then
               echo
               cat .release/mobile-release-notes.md
             fi
             echo
-            echo "Retention: only the latest release plus the 3 previous APKs are kept; older releases are deleted automatically."
+            echo "Retention: only the latest release plus the 3 previous releases are kept; older releases are deleted automatically."
           } > release-body.md
 
       - name: Publish APK release
@@ -350,7 +408,9 @@ jobs:
           tag_name: android-${{ github.run_number }}-${{ needs.sync.outputs.upstream_new }}
           name: Android build ${{ github.run_number }}
           body_path: release-body.md
-          files: t3code-universal.apk
+          files: |
+            t3code-arm64-v8a.apk
+            t3code-universal.apk
           make_latest: true
 
       - name: Prune old releases (keep latest + 3)

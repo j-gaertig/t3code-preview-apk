@@ -2,19 +2,22 @@
 
 Preview builds of the [T3 Code](https://github.com/pingdotgg/t3code) Android app, built from the official repository.
 
+[![Download APK](https://forthebadge.com/api/badges/generate?panels=2&primaryLabel=Download+APK&secondaryLabel=arm64%2Bv8a&primaryBGColor=%2331C4F3&primaryTextColor=%23FFFFFF&secondaryBGColor=%23389AD5&secondaryTextColor=%23FFFFFF&primaryFontSize=12&primaryFontWeight=600&primaryLetterSpacing=2&primaryFontFamily=Roboto&primaryTextTransform=uppercase&secondaryFontSize=12&secondaryFontWeight=900&secondaryLetterSpacing=0&secondaryFontFamily=Verdana&secondaryTextTransform=lowercase&borderRadius=5)](https://github.com/j-gaertig/t3code-preview-apk/releases/latest/download/t3code-arm64-v8a.apk)
 [![Download APK](https://forthebadge.com/api/badges/generate?panels=2&primaryLabel=Download+APK&secondaryLabel=universal&primaryBGColor=%2331C4F3&primaryTextColor=%23FFFFFF&secondaryBGColor=%23389AD5&secondaryTextColor=%23FFFFFF&primaryFontSize=12&primaryFontWeight=600&primaryLetterSpacing=2&primaryFontFamily=Roboto&primaryTextTransform=uppercase&secondaryFontSize=12&secondaryFontWeight=900&secondaryLetterSpacing=0&secondaryFontFamily=Verdana&secondaryTextTransform=lowercase&borderRadius=5)](https://github.com/j-gaertig/t3code-preview-apk/releases/latest/download/t3code-universal.apk)
 
-**Download the latest build here:** [t3code-universal.apk](https://github.com/j-gaertig/t3code-preview-apk/releases/latest/download/t3code-universal.apk) · [All releases](https://github.com/j-gaertig/t3code-preview-apk/releases)
+**Download the latest build here:** [t3code-arm64-v8a.apk](https://github.com/j-gaertig/t3code-preview-apk/releases/latest/download/t3code-arm64-v8a.apk) (slim, for modern phones) · [t3code-universal.apk](https://github.com/j-gaertig/t3code-preview-apk/releases/latest/download/t3code-universal.apk) (all ABIs, e.g. for emulators) · [All releases](https://github.com/j-gaertig/t3code-preview-apk/releases)
 
 New builds are published automatically about once an hour whenever the official app changed. Only the latest release plus the 3 previous ones are kept.
 
 ## Install
 
-The app uses the official package ID `com.t3tools.t3code`, but it is signed with a different key than the Play Store version. Uninstall the Play Store app first, then download the APK above and open it (allow “Install unknown apps” for your browser when asked).
+The app uses the official package ID `com.t3tools.t3code`, but it is signed with a different key than the Play Store version. Uninstall the Play Store app first, then download one of the APKs above and open it (allow “Install unknown apps” for your browser when asked).
+
+Use the **arm64-v8a** APK for phones — it covers essentially every modern device and is by far the smallest download. The **universal** APK additionally contains `armeabi-v7a`, `x86` and `x86_64` libraries for Android emulators, Chromebooks and older 32-bit devices, which is why it stays around 280 MB.
 
 ## Verify
 
-Every release lists its version, file size, SHA-256 checksum, native ABIs and signing certificate so you can check the download before installing:
+Every release lists its versions, file sizes, SHA-256 checksums for both APKs, native ABIs and signing certificate so you can check the download before installing:
 
 ```bash
 sha256sum t3code-universal.apk
